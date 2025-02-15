@@ -1,50 +1,94 @@
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 import pandas as pd
+import nltk
+from nltk.tokenize import word_tokenize
+from nltk.corpus import wordnet
 
-# Cargar los datos desde el archivo CSV
+# Configuración de NLTK
+nltk.data.path.append('C:/Users/joell/AppData/Local/Programs/Python/Python312/Scripts/nltk_data')
+nltk.download('punkt')
+nltk.download('wordnet')
+nltk.download('omw-1.4')
+
+# Cargar los datos desde el CSV
 def load_energy_data():
     df = pd.read_csv("Dataset/World_Energy_Consumption.csv")
-    df = df.fillna('').astype(str)  # Convierte todo a string después de reemplazar nulos
-    return df
+    df = df.astype(str).fillna("")  # Rellenar valores vacíos con cadena vacía
+    return df.to_dict(orient="records")
 
-# Cargamos los datos al iniciar la API
-data = load_energy_data()
+# Cargar datos al iniciar la API
+energy_data = load_energy_data()
 
-# Inicializamos la API
-app = FastAPI(title="API de Consumo de Energía", version="1.0.0")
+# Obtener sinónimos de palabras clave
+def get_synonyms(word):
+    synonyms = {word.lower()}  # Incluir la palabra original
+    for syn in wordnet.synsets(word):
+        for lemma in syn.lemmas():
+            synonyms.add(lemma.name().lower())
+    return synonyms
 
-# Ruta de bienvenida
-@app.get("/")
+# Inicializar FastAPI
+app = FastAPI(title="Energy API", version="1.0.0")
+
+@app.get("/", tags=["Home"])
 def home():
-    return JSONResponse(content={"mensaje": "Bienvenido a la API de Consumo de Energía"})
+    return HTMLResponse("<h1>Bienvenido a la API de Consumo de Energía</h1>")
 
-# Obtener todos los datos
-@app.get("/energy")
-def get_all_energy_data():
-    return data.to_dict(orient='records')
+@app.get("/energy", tags=["Energy"])
+def get_energy_data():
+    return energy_data or HTTPException(status_code=500, detail="No hay datos disponibles")
 
-# Buscar por país y/o año
-@app.get("/energy/search")
-def search_energy_data(country: str = None, year: int = None):
-    df_filtered = data.copy()
-    if country:
-        df_filtered = df_filtered[df_filtered['country'].str.lower() == country.lower()]
+@app.get("/energy/{country}", tags=["Energy"])
+def get_energy_by_country(country: str, year: int = None):
+    results = [e for e in energy_data if e["country"].lower() == country.lower()]
     if year:
-        df_filtered = df_filtered[df_filtered['year'] == year]
-    
-    if df_filtered.empty:
-        raise HTTPException(status_code=404, detail="No se encontraron resultados")
-    
-    return df_filtered.to_dict(orient='records')
+        results = [e for e in results if e["year"].isdigit() and int(e["year"]) == year]
+    return results or {"detalle": "No se encontraron datos"}
 
-# Filtrar por tipo de energía
-@app.get("/energy/type")
-def filter_by_energy_type(energy_type: str):
-    energy_columns = [col for col in data.columns if energy_type.lower() in col.lower()]
-    
-    if not energy_columns:
-        raise HTTPException(status_code=400, detail="Tipo de energía no válido")
-    
-    df_filtered = data[['country', 'year'] + energy_columns]
-    return df_filtered.to_dict(orient='records')
+@app.get("/chatbot", tags=["Chatbot"])
+def chatbot(query: str):
+    query_words = word_tokenize(query.lower())
+    synonyms = set()
+
+    # Generar sinónimos de las palabras clave
+    for word in query_words:
+        synonyms.update(get_synonyms(word))
+
+    # Extraer datos clave de la consulta
+    country = None
+    year = None
+    energy_type = None
+
+    for word in query_words:
+        if word.isdigit():  # Si es un número, asumimos que es un año
+            year = int(word)
+        elif word.title() in {e["country"] for e in energy_data}:  # Si está en la lista de países
+            country = word.title()
+        elif any(word in str(e.keys()).lower() for e in energy_data):  # Si es un tipo de energía
+            energy_type = word
+
+    # Generar respuestas según la consulta detectada
+    if country and year:
+        results = [e for e in energy_data if e["country"].lower() == country.lower() and int(e["year"]) == year]
+        return results or {"respuesta": f"No encontré datos para {country} en {year}."}
+
+    if country:
+        results = [e for e in energy_data if e["country"].lower() == country.lower()]
+        return results[:5] or {"respuesta": f"No encontré datos para {country}."}  # Máximo 5 resultados
+
+    if energy_type and year:
+        results = [e for e in energy_data if energy_type in e and int(e["year"]) == year]
+        return results or {"respuesta": f"No encontré datos sobre {energy_type} en {year}."}
+
+    if energy_type:
+        results = [e for e in energy_data if energy_type in e]
+        return results[:5] or {"respuesta": f"No encontré datos sobre {energy_type}."}  # Máximo 5 resultados
+
+    return {"respuesta": "No entendí tu pregunta. Puedes intentar con algo como: 'Consumo de energía en España en 2020'."}
+
+
+@app.get("/energy/by_type", tags=["Energy"])
+def get_energy_by_type(energy_type: str):
+    results = [e for e in energy_data if energy_type.lower() in str(e.values()).lower()]
+    return results or {"detalle": "No se encontraron datos para este tipo de energía"}
